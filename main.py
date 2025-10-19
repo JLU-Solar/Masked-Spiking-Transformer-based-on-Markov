@@ -2,31 +2,30 @@
 # Masked Spiking Transformer
 # --------------------------------------------------------
 
-import os
-import time
-import json
-import random
 import argparse
 import datetime
-import numpy as np
+import json
+import os
+import random
+import time
 
+import numpy as np
+import spikingjelly.clock_driven.functional as functional
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
-
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import accuracy, AverageMeter
+from tqdm import tqdm
 
 from config import get_config
-from models import build_model
 from data import build_loader
-from lr_scheduler import build_scheduler
-from optimizer import build_optimizer
 from logger import create_logger
-from utils import load_checkpoint, load_pretrained, save_checkpoint, NativeScalerWithGradNormCount, auto_resume_helper, \
+from lr_scheduler import build_scheduler
+from models import build_model
+from optimizer import build_optimizer
+from utils import load_checkpoint, load_pretrained, NativeScalerWithGradNormCount, auto_resume_helper, \
     reduce_tensor
 from utils_QCFS import *
-import spikingjelly.clock_driven.functional as functional
-from tqdm import tqdm
 
 
 def parse_option():

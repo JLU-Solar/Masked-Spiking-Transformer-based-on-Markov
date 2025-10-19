@@ -3,12 +3,13 @@
 # --------------------------------------------------------
 
 import os
+
 import torch
 import torch.distributed as dist
-from torchvision import datasets, transforms
-from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.data import Mixup
 from timm.data import create_transform
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from torchvision import datasets, transforms
 
 from .cached_image_folder import CachedImageFolder
 from .samplers import SubsetRandomSampler
@@ -36,7 +37,6 @@ except:
     from timm.data.transforms import _pil_interp
 
 import numpy as np
-from PIL import Image
 
 
 def build_loader(config):

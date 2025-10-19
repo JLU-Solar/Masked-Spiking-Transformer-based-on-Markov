@@ -40,7 +40,7 @@ def build_model(config, args):
                                          use_checkpoint=config.TRAIN.USE_CHECKPOINT,
                                          fused_window_process=config.FUSED_WINDOW_PROCESS,
                                          masking_ratio=args.masking_ratio,
-                                         dataset=args.dataset,)
+                                         dataset=args.dataset, )
     else:
         raise NotImplementedError(f"Unkown model: {model_type}")
 

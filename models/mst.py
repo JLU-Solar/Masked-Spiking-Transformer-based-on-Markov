@@ -27,7 +27,8 @@ def Masking_Spike(x, masking_ratio=0.):
 
 
 class SpikingMlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., masking_ratio=0., dataset='imagenet'):
+    def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., masking_ratio=0.,
+                 dataset='imagenet'):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -232,7 +233,8 @@ class MaskedSpikingTransformerBlock(nn.Module):
         self.norm2 = nn.BatchNorm1d(dim)
         self.shortcut2_if = nn.ReLU()
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = SpikingMlp(in_features=dim, hidden_features=mlp_hidden_dim, drop=drop, masking_ratio=self.masking_ratio, dataset=dataset)
+        self.mlp = SpikingMlp(in_features=dim, hidden_features=mlp_hidden_dim, drop=drop,
+                              masking_ratio=self.masking_ratio, dataset=dataset)
 
         if self.shift_size > 0:
             # calculate attention mask for SW-MSA
@@ -396,7 +398,8 @@ class BasicLayer(nn.Module):
                                           qkv_bias=qkv_bias, qk_scale=qk_scale,
                                           drop=drop, attn_drop=attn_drop,
                                           drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                                          fused_window_process=fused_window_process, masking_ratio=self.masking_ratio, dataset=dataset)
+                                          fused_window_process=fused_window_process, masking_ratio=self.masking_ratio,
+                                          dataset=dataset)
             for i in range(depth)])
 
         # patch merging layer
@@ -536,7 +539,8 @@ class MaskedSpikingTransformer(nn.Module):
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                downsample=SpikingPatchMerging if (i_layer < self.num_layers - 1) else None,
                                use_checkpoint=use_checkpoint,
-                               fused_window_process=fused_window_process, masking_ratio=self.masking_ratio, dataset=dataset)
+                               fused_window_process=fused_window_process, masking_ratio=self.masking_ratio,
+                               dataset=dataset)
             self.layers.append(layer)
 
         self.norm = norm_layer(self.num_features)
