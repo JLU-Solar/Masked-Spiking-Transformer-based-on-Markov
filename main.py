@@ -49,7 +49,7 @@ def parse_option():
                         help="Group number of the masking operation in the Masked Spiking Neurons.")
     parser.add_argument("--tauMask", type=float, default=0.5,
                         help="The temperature coefficient of the Gumbel relaxation in the Masked Spiking Neurons.")
-    parser.add_argument("--tauTopKk", type=float, default=0.5,
+    parser.add_argument("--tauTopk", type=float, default=0.5,
                         help="The temperature coefficient in the Topk operation in the Masked Spiking Neurons.")
     parser.add_argument("--notSoftTopk", default=True, action="store_false",
                         help="If learn the sorting of the probabilities in the Masked Spiking Neurons.")
