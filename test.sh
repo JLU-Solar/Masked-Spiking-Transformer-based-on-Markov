@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=7 python main.py --cfg configs/mst/MST.yaml --batch-size 128 --masking_ratio 0.5
