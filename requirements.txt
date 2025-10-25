@@ -6,6 +6,6 @@ setuptools==59.8.0
 spikingjelly==0.0.0.0.12
 termcolor==1.1.0
 timm==0.6.7
-torch==1.12.1+cu116
-torchvision==0.13.1+cu116
+torch==1.12.1
+torchvision==0.13.1
 yacs==0.1.8
