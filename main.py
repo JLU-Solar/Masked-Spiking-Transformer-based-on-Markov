@@ -142,10 +142,14 @@ def main(config, args):
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     ann = build_model(config, args, nameLogger=logger.name)
     threshold = args.threshold
-    snn = replace_activation_by_floor(ann,
-                                      t=args.Latency,  # 默认值16
-                                      threshold=threshold,
-                                      nameLogger=logger.name)
+    snn = replace_activation_by_floor(
+        ann,
+        t=args.Latency,  # 默认值16
+        threshold=threshold,
+        args=args,
+        typeZJ=args.typeZJ,
+        nameLogger=logger.name
+    )
 
     # 只在主进程打印模型 & 统计参数
     if rank == 0:
