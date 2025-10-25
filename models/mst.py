@@ -8,6 +8,8 @@ import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
+from modules_QCFS import MyDarts
+
 try:
     import os, sys
 
@@ -57,6 +59,22 @@ class SpikingMlp(nn.Module):
         x = self.fc2_if(x)
         x = self.drop(x)
         return x
+
+
+class NewSpikingMLP(SpikingMlp):
+    def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., ):
+        r"""
+        TODO 先根据 MyDarts 的定义，全部参数形参传递，所需的参数，放到给该类的构造函数；
+         然后再把父类参数抄一遍，也给构造函数；
+         最后再把父类需要的参数，形参传递，交给super().__init__()
+        :param in_features:
+        :param hidden_features:
+        :param out_features:
+        :param drop:
+        """
+        super().__init__()
+        self.fc1_if = MyDarts()
+        self.fc2_if = MyDarts()
 
 
 def window_partition(x, window_size):
@@ -186,6 +204,27 @@ class SpikingWindowAttention(nn.Module):
         return x
 
 
+class NewSpikingWindowAttention(SpikingWindowAttention):
+    def __init__(self, dim, num_heads=8, qkv_bias=True, attn_drop=0., proj_drop=0.):
+        r"""
+        TODO 先根据 MyDarts 的定义，全部参数形参传递，所需的参数，放到给该类的构造函数；
+         然后再把父类参数抄一遍，也给构造函数；
+         最后再把父类需要的参数，形参传递，交给super().__init__()
+        :param dim:
+        :param num_heads:
+        :param qkv_bias:
+        :param attn_drop:
+        :param proj_drop:
+        """
+        super().__init__(dim=dim, )
+        self.q_if = MyDarts(group=self.qkv.in_features)
+        self.k_if = MyDarts()
+        self.v_if = MyDarts()
+        self.attn_drop = MyDarts()
+        self.attn_if = MyDarts()
+        self.proj_if = MyDarts()
+
+
 class MaskedSpikingTransformerBlock(nn.Module):
     r""" Masked Spiking Transformer Block.
 
@@ -313,6 +352,21 @@ class MaskedSpikingTransformerBlock(nn.Module):
         return x
 
 
+class NewMaskedSpikingTransformerBlock(MaskedSpikingTransformerBlock):
+    def __init__(self, input_resolution, dim, masking_ratio=0.):
+        r"""
+        TODO 先根据 MyDarts 的定义，全部参数形参传递，所需的参数，放到给该类的构造函数；
+         然后再把父类参数抄一遍，也给构造函数；
+         最后再把父类需要的参数，形参传递，交给super().__init__()
+        :param input_resolution:
+        :param dim:
+        :param masking_ratio:
+        """
+        super().__init__()
+        self.shortcut1_if = MyDarts()
+        self.shortcut2_if = MyDarts()
+
+
 class SpikingPatchMerging(nn.Module):
     r""" Spiking Patch Merging Layer.
 
@@ -352,6 +406,17 @@ class SpikingPatchMerging(nn.Module):
         x = self.reduction(x)
         x = self.reduction_if(x)
         return x
+
+
+class NewSpikingPatchMerging(SpikingPatchMerging):
+    def __init__(self, ):
+        r"""
+        TODO 先根据 MyDarts 的定义，全部参数形参传递，所需的参数，放到给该类的构造函数；
+         然后再把父类参数抄一遍，也给构造函数；
+         最后再把父类需要的参数，形参传递，交给super().__init__()
+        """
+        super().__init__()
+        self.reduction_if = MyDarts()
 
 
 class BasicLayer(nn.Module):
@@ -460,6 +525,13 @@ class SpikingPatchEmbed(nn.Module):
             x = self.norm(x.transpose(1, 2).contiguous()).transpose(1, 2).contiguous()
         x = self.proj_if(x)
         return x
+
+
+class NewSpikingPatchEmbed(SpikingPatchEmbed):
+    def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None,
+                 masking_ratio=0.):
+        super().__init__()
+        self.proj = MyDarts()
 
 
 class MaskedSpikingTransformer(nn.Module):

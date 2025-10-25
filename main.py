@@ -143,7 +143,7 @@ def main(config, args):
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     ann = build_model(config, args, nameLogger=logger.name)
     threshold = args.threshold
-    snn = replace_activation_by_floor(
+    snn = replace_activation_by_floor_Gt(
         ann,
         t=args.Latency,  # 默认值16
         threshold=threshold,

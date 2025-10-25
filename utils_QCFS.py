@@ -4,7 +4,9 @@ from argparse import Namespace
 import torch
 import torch.nn as nn
 
-from models.mst import MaskedSpikingTransformer
+from models.mst import MaskedSpikingTransformer, NewSpikingWindowAttention, SpikingWindowAttention, SpikingMlp, \
+    NewSpikingMLP, SpikingPatchMerging, NewSpikingPatchMerging, NewMaskedSpikingTransformerBlock, \
+    MaskedSpikingTransformerBlock, NewSpikingPatchEmbed, SpikingPatchEmbed
 from modules_QCFS import TCL, MyFloor, ScaledNeuron, StraightThrough, MyDarts, MyMarkov
 
 
@@ -18,6 +20,36 @@ def issigmoid(name):
     if 'sigmoid' in name.lower():
         return True
     return False
+
+
+def replace_activation_by_floor_Gt(model: MaskedSpikingTransformer,
+                                   t: int,
+                                   threshold: float,
+                                   args: Namespace,
+
+                                   namelogger: str,
+                                   m):
+    logger = logging.getLogger(namelogger)
+    for name, module in model._modules.items():
+        logger.info(f"当前处理模块，名字 {name}，源类型 {type(module)}")
+        if isinstance(module, SpikingWindowAttention):
+            newModule = NewSpikingWindowAttention()
+
+        elif isinstance(module, SpikingMlp):
+            newModule = NewSpikingMLP()
+
+        elif isinstance(module, SpikingPatchMerging):
+            newModule = NewSpikingPatchMerging()
+
+        elif isinstance(module, MaskedSpikingTransformerBlock):
+            newModule = NewMaskedSpikingTransformerBlock()
+
+        elif isinstance(module, SpikingPatchEmbed):
+            newModule = NewSpikingPatchEmbed()
+        else:
+            raise NotImplementedError(f"当前模块 {name} 不支持转换")
+        logger.info(f"模块 {name} 替换为新类型- {type(newModule)}")
+        model._modules[name] = newModule
 
 
 def replace_activation_by_module(model, m):
@@ -37,7 +69,6 @@ def replace_activation_by_floor(model: MaskedSpikingTransformer,
                                 t: int,
                                 threshold: float,
                                 args: Namespace,
-                                typeZJ: str,
                                 nameLogger: str):
     r"""
 
@@ -49,8 +80,6 @@ def replace_activation_by_floor(model: MaskedSpikingTransformer,
     :type threshold: float
     :param args:
     :type args: Namespace
-    :param typeZJ:
-    :type typeZJ: str
     :param nameLogger:
     :type nameLogger: str
     :return:
@@ -64,7 +93,7 @@ def replace_activation_by_floor(model: MaskedSpikingTransformer,
         if hasattr(module, "_modules"):
             model._modules[name] = replace_activation_by_floor(
                 module, t, threshold,
-                args, typeZJ, nameLogger
+                args, nameLogger
             )
         if isActivation(module.__class__.__name__.lower()):
             valueUp = threshold
