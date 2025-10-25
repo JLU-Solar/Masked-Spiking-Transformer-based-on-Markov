@@ -16,7 +16,7 @@ build-backend = "poetry.core.masonry.api"
 text = "MiT"
 
 [tool.poetry.dependencies]
-# 请选择与你环境匹配的 Python 版本（Torch 2.8 通常支持 3.10~3.12）
+
 python = "3.10.18"
 
 # ---- Core runtime ----
@@ -35,13 +35,13 @@ tqdm = "4.67.1"
 tensorboard = "2.20.0"
 tensorboard-data-server = "0.7.2"
 
-# ---- HF ecosystem (如使用到) ----
+# ---- HF ecosystem  ----
 huggingface-hub = "0.35.3"
 safetensors = "0.6.2"
 fsspec = "2024.6.1"
 requests = "2.32.5"
 
-# ---- Optional: Lightning（若你代码确实使用）----
+# ---- Optional: Lightning----
 pytorch-lightning = "2.5.5"
 lightning-utilities = "0.15.2"
 
@@ -54,7 +54,7 @@ triton = "3.4.0"
  ipython = "8.37.0"
  matplotlib = "3.10.7"
 
-# ===== PyTorch CUDA 12.6 源（根据你 requirements 的 +cu126）=====
+# ===== PyTorch CUDA 12.6 源 =====
 [[tool.poetry.source]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
