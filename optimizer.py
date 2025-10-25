@@ -4,6 +4,8 @@
 # Licensed under The MIT License [see LICENSE for details]
 # Written by Ze Liu
 # --------------------------------------------------------
+import logging
+from pprint import pformat
 from typing import Union, Tuple, Type, Dict
 
 from torch import optim as optim, nn
@@ -63,20 +65,27 @@ def regular_set(model, paras=([], [], [], [])):
 
 
 def build_optimizer(config,
-                    model: MaskedSpikingTransformer) -> None:
+                    model: MaskedSpikingTransformer,
+                    nameLogger: str) -> None:
     r"""
     Build optimizer, set weight decay of normalization to 0 by default.
     :param config:
     :type config:
     :param model:
     :type model:
+    :param nameLogger:
+    :type nameLogger:
     """
+    logger = logging.getLogger(nameLogger)
     skip = {}
     skip_keywords = {}
     if hasattr(model, 'no_weight_decay'):
         skip = model.no_weight_decay()
     if hasattr(model, 'no_weight_decay_keywords'):
         skip_keywords = model.no_weight_decay_keywords()
+    dictInfoAfterSetGrads = set_requires_grad_switch(model=model,
+                                                     mode="only_ZJ")
+    logger.info(f"梯度设置的结果：{pformat(dictInfoAfterSetGrads)}")
     parameters = set_weight_decay(model, skip, skip_keywords)
 
     # para1, para2, para3, para4 = regular_set(model)
@@ -165,72 +174,46 @@ def set_requires_grad_switch(
 
     assert mode in {"all", "none", "only_ZJ", "except_ZJ"}, f"Unsupported mode: {mode}"
 
-    # 去重集合，防止共享参数重复统计/设置
-    seen = set()
-
-    def _mark_params(mod: nn.Module, flag: bool):
-        r"""
-        【安全地、无重复地】 修改当前模块中所有参数的 requires_grad，
-        并记录统计信息。
-        :param mod:
-        :param flag:
-        :return:
-        """
-        nonlocal seen_true, seen_false
-
-        for p in mod.parameters(recurse=False):  # recurse=False 只处理当前模块直接持有的参数
-            pid = id(p)
-            if pid in seen:
-                # 已处理过的共享参数，仅在需要时覆盖
-                p.requires_grad = flag if mode in {"all", "none"} else p.requires_grad if pid in seen else flag
-                continue
-            seen.add(pid)
+    def _set_direct(m: nn.Module, flag: bool) -> None:
+        # 只改当前模块直接持有的参数
+        for p in m.parameters(recurse=False):
             p.requires_grad = flag
-            if flag:
-                seen_true += 1
-            else:
-                seen_false += 1
-
-    total = sum(1 for _ in model.parameters())
-    seen_true = 0
-    seen_false = 0
 
     if mode == "all":
         # 1) 全训练
         for m in model.modules():
-            _mark_params(m, True)
+            _set_direct(m, True)
 
     elif mode == "none":
         # 4) 全冻结
         for m in model.modules():
-            _mark_params(m, False)
+            _set_direct(m, False)
 
-    elif mode == "only_types":
-        # 2) 仅训练张嘉
-        # 先全 False
-        for m in model.modules():
-            _mark_params(m, False)
+    elif mode == "only_ZJ":
+        # 先全 False，再仅把命中类型的“自身直接参数”设 True
 
-        # 再将张嘉类型（及其子模块的直接) 参数设置为 True
         for m in model.modules():
-            if isinstance(m, target_types):
-                # 目标块及其子树里的“直接参数”都设置 True：
-                # 遍历子树时使用 modules()，每个节点调用 _mark_params(recurse=False)
-                for sub in m.modules():
-                    _mark_params(sub, True)
+            _set_direct(m, False)
 
-    elif mode == "except_types":
-        # 3) 只有张嘉不训练
-        # 先全 True
-        for m in model.modules():
-            _mark_params(m, True)
-        # 再把目标类型（及其子模块）置 False
         for m in model.modules():
             if isinstance(m, target_types):
-                for sub in m.modules():
-                    _mark_params(sub, False)
+                _set_direct(m, True)
 
-    return {"set_true": seen_true, "set_false": seen_false, "total": total}
+
+    elif mode == "except_ZJ":
+        # 先全 True，再仅把命中类型的“自身直接参数”设 False
+
+        for m in model.modules():
+            _set_direct(m, True)
+
+        for m in model.modules():
+            if isinstance(m, target_types):
+                _set_direct(m, False)
+        # 统计最终状态
+    params = list(model.parameters())
+    set_true = sum(p.requires_grad for p in params)
+    total = len(params)
+    return {"set_true": set_true, "set_false": total - set_true, "total": total}
 
 
 def check_keywords_in_name(name, keywords=()):

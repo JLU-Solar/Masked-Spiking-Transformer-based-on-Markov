@@ -89,10 +89,11 @@ def replace_activation_by_floor(model: MaskedSpikingTransformer,
                                                           group=args.group,
                                                           tauMask=args.tauMask,
                                                           tauTopk=args.tauTopk,
-                                                          softTopk=not args.notSoftTopk,
+                                                          softTopk=args.SoftTopk,
                                                           concrete=args.concrete,
                                                           eps=args.eps,
                                                           init_probs_ratio=args.init_probs_ratio,
+                                                          init_prob=args.init_prob,
                                                           if_learn_top_probs=args.if_learn_top_probs)
             # model._modules[name] = MyFloor(valueUp, t)
 

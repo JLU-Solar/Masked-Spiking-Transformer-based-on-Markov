@@ -169,16 +169,17 @@ class MyMarkov(nn.Module):
         """
         # 先经过已有的量化步骤。形状是（T,B,C,H,W).
         y = self.inner(x)
-        T, B, C, H, W = y.shape
-
-        assert T == self.T, f"T 不匹配: 量化输出 y 的 T = {T}, 模块定义的 T={self.T}"
-        assert C % self.G == 0, f"C={C} 不能被 G={self.group} 整除"
+        # T, B, C, H, W = y.shape
+        B, C, H, W = y.shape
+        # assert T == self.T, f"T 不匹配: 量化输出 y 的 T = {T}, 模块定义的 T={self.T}"
+        assert C % self.group == 0, f"C={C} 不能被 G={self.group} 整除"
 
         perG: int = C // self.group
 
         probs = self.probs[:, None, :, None, None, None, None]  # (T,1,G,1,1,1)
 
-        yg = y.view(T, B, self.group, perG, H, W)
+        # yg = y.view(T, B, self.group, perG, H, W)
+        yg = y.view(B, self.group, perG, H, W)
 
         # region === Concrete (Gumbel-Sigmoid) 采样 ===
         # 连续化近似伯努利采样，也叫 Concrete dropout 或 Gumbel-Sigmoid reparameterization trick。
@@ -202,7 +203,8 @@ class MyMarkov(nn.Module):
         # endregion
 
         out_g = yg * mask
-        out = out_g.reshape(T, B, C, H, W)
+        # out = out_g.reshape(T, B, C, H, W)
+        out = out_g.reshape(B, C, H, W)
         return out
 
 
@@ -217,6 +219,7 @@ class MyDarts(nn.Module):
                  softTopk: bool = True,
                  concrete: bool = False,
                  eps: float = 1e-6,
+                 init_prob: float = 0.5,
                  init_probs_ratio: float = 0.5,
                  if_learn_top_probs: bool = False,
                  dtype: torch.dtype = torch.float,
@@ -240,6 +243,8 @@ class MyDarts(nn.Module):
         :type concrete: bool
         :param eps:
         :type eps: float
+        :param init_prob:
+        :type init_prob: float
         :param init_probs_ratio:
         :type init_probs_ratio: float
         :param if_learn_top_probs:
@@ -266,7 +271,7 @@ class MyDarts(nn.Module):
         self.tauMask = tauMask  # 温度系数。
         self.tauTopk = tauTopk
         self.softTopk = softTopk
-        # self.top_probs_ratio: nn.Parameter | torch.Tensor = None
+        self.init_prob = init_prob
         self._init_top_probs_ratio(init_probs_ratio)
         self.init_probs_ratio = torch.tensor(init_probs_ratio,
                                              dtype=dtype,
@@ -323,13 +328,20 @@ class MyDarts(nn.Module):
         :return:
         :rtype: None
         """
-        q0 = 0.5
-        init = self.logit(torch.tensor(q0, dtype=dtype, device=device))
-        param = init.expand(self.T, self.group).clone().contiguous()
+        self.logger.debug(f"初始概率：{self.init_prob}")
+        init = self.logit(torch.tensor(self.init_prob, dtype=dtype, device=device))
+        # param = init.expand(self.T, self.group).clone().contiguous()
+        param = init.expand(self.group, ).clone().contiguous()
         self.probs = nn.Parameter(param, requires_grad=True)
-        self.logger.debug(f"初始概率：{pformat(self.probs)}")
 
-    def _top_probs_mask(self) -> None:
+        self.logger.debug(f"初始概率（对数概率形式）：{pformat(self.probs)}")
+
+    def _top_probs_mask(self) -> Tensor:
+        r"""
+
+        :return:
+        :rtype: Tensor
+        """
         top_probs_ratio = torch.clamp(self.top_probs_ratio, 0, 1)
 
         # 展平概率张量 (T*G, )
@@ -349,16 +361,19 @@ class MyDarts(nn.Module):
         mask = (self.probs >= threshold).float()
         self.logger.debug(f"按照：{pformat(mask)} 对概率张量进行掩码。")
         # 应用 mask
-        self.probs = self.probs * mask
-        self.logger.debug(f"掩码更新后的概率为：{pformat(self.probs)}")
+        probs = self.probs * mask
+        self.logger.debug(f"掩码更新后的概率为：{pformat(probs)}")
+        return probs
 
-    def _top_probs_mask_soft(self, temperature: float = 0.1) -> None:
+    def _top_probs_mask_soft(self, temperature: float = 0.1) -> Tensor:
         """
         可导的软 TopK 近似。
         用 softmax(probs / T) 得到连续权重，再把加和缩放到 k（由 ratio 推出）。
         完全可导；不会做任何硬阈值或离散索引。
         :param temperature:
         :type temperature: float
+        :return:
+        :rtype: Tensor
         """
         # 1) 计算 k
         flat = self.probs.flatten()
@@ -376,11 +391,46 @@ class MyDarts(nn.Module):
         mask_soft = weights * (k / sum_w)  # 完全可导 ✔
 
         # 4) 应用“软掩码”（得到稀疏近似效果，但梯度处处存在）
-        self.probs = self.probs * mask_soft  # 线性，可导 ✔
+        probs = self.probs * mask_soft
 
         # 可选：日志
         self.logger.debug(f"[soft-topk] temperature={temperature}, k={k}, sum(mask)≈{mask_soft.sum().item():.3f}")
-        self.logger.debug(f"掩码更新后的概率为：{pformat(self.probs)}")
+        self.logger.debug(f"掩码更新后的概率为：{pformat(probs)}")
+        return probs
+
+    # --------  --------
+    def _sample_mask(self,
+                     yg: Tensor,
+                     probs_logits_bc: Tensor) -> Tensor:
+        """
+        抽出公共的采样函数，避免重复代码
+        :param yg: 需要门控的张量（已 reshape 后），形状可为 (B, N, G, perG) 或 (B, H, N, G, perG)
+        :type yg: Tensor
+        :param probs_logits_bc: 广播后的组门控 logits，形如 (1,1,G,1) 或 (1,1,1,G,1)
+        :type probs_logits_bc: Tensor
+        :return 返回 mask，与 yg 形状一致
+        :rtype: Tensor
+        """
+        # region === Concrete (Gumbel-Sigmoid) 采样 ===
+        # 连续化近似伯努利采样，也叫 Concrete dropout 或 Gumbel-Sigmoid reparameterization trick。
+        if self.concrete:
+            # Concrete/Gumbel-Sigmoid 连续掩码
+            u = torch.rand_like(yg)
+            noiseG = torch.log(u) - torch.log1p(-u)
+            mask = torch.sigmoid((probs_logits_bc + noiseG) / self.tauMask)  # (0,1)
+        # endregion
+
+        # region === 直通概率 ===
+        else:
+            # 现将 Logits 类型的实数概率，映射回 0-1 之间的常规概率。
+            probs = self.sig(probs_logits_bc)  # (.., G, ..)
+            probs = torch.clamp(probs, self.eps, 1 - self.eps)  # 防止超出 [0, 1] 的范围
+            # 硬伯努利 + 直通估计
+            with torch.no_grad():
+                hard = torch.bernoulli(probs.expand_as(yg))
+            mask = (hard - probs).detach() + probs  # STE
+        # endregion
+        return mask
 
     def forward(self, x: Tensor) -> Tensor:
         r"""
@@ -390,47 +440,66 @@ class MyDarts(nn.Module):
         :return:
         :rtype: Tensor
         """
-        # 先经过已有的量化步骤。形状是（T,B,C,H,W).
+        # 先经过已有的量化步骤。形状是(B, HW, C) 或 (B, numHeads, N, C/numHeads)
         y = self.inner(x)
-        T, B, C, H, W = y.shape
+        ndim = y.dim()
 
-        assert T == self.T, f"T 不匹配: 量化输出 y 的 T = {T}, 模块定义的 T={self.T}"
-        assert C % self.G == 0, f"C={C} 不能被 G={self.group} 整除"
-        perG: int = C // self.group
+        if ndim == 3:
+            # y: (B, HW, C)
+            B, HW, C = y.shape
 
-        if self.softTopk:
-            self._top_probs_mask_soft(temperature=self.tauTopk)
+            # assert T == self.T, f"T 不匹配: 量化输出 y 的 T = {T}, 模块定义的 T={self.T}"
+            assert C % self.group == 0, f"C={C} 不能被 G={self.group} 整除"
+            perG: int = C // self.group
+
+            # (B, HW, C) -> (B, HW, G, perG)
+            yg = y.reshape(B, HW, self.group, perG)  # 用 reshape 以防非 uncontiguous
+
+            # 仅在 G 维做 top-k 掩码：_top_probs_mask_* 返回形状 (G,) 的“有效 logits”，不原地改 Parameter
+            if self.softTopk:
+                probs_logits = self._top_probs_mask_soft(temperature=self.tauTopk)  # (G,)
+            else:
+                probs_logits = self._top_probs_mask()  # (G,)
+
+            # 广播到 (B, HW, G, perG)
+            probs_logits_bc = probs_logits.view(1, 1, self.group, 1)  # (1, 1, G, 1)
+
+            # 采样（Concrete 或 STE），得到与 yg 同形状的 mask
+            mask = self._sample_mask(yg, probs_logits_bc)
+
+            out_g = yg * mask
+            out = out_g.reshape(B, HW, C)
+            return out
+
+        elif ndim == 4:
+            # 兼容 q/k/v：y 形状是（B, numHeads, N, C/numHeads）
+            B, H, N, Cph = y.shape
+
+            # assert T == self.T, f"T 不匹配: 量化输出 y 的 T = {T}, 模块定义的 T={self.T}"
+            assert Cph % self.group == 0, f"C={Cph} 不能被 G={self.group} 整除"
+            perG: int = Cph // self.group
+
+            # (B, H, N, Cph) -> (B, H, N, G, perG)
+            yg = y.reshape(B, H, N, self.group, perG)  # 用 reshape 以防非 uncontiguous
+
+            # 仅在 G 维做 top-k 掩码：_top_probs_mask_* 返回形状 (G,) 的“有效 logits”，不原地改 Parameter
+            if self.softTopk:
+                probs_logits = self._top_probs_mask_soft(temperature=self.tauTopk)  # (G,)
+            else:
+                probs_logits = self._top_probs_mask()  # (G,)
+
+            # 广播到 (B, H, N, G, perG)
+            probs_logits_bc = probs_logits.view(1, 1, 1, self.group, 1)  # (1, 1, 1, G, 1)
+
+            # 采样（Concrete 或 STE），得到与 yg 同形状的 mask
+            mask = self._sample_mask(yg, probs_logits_bc)
+
+            out_g = yg * mask
+            out = out_g.reshape(B, H, N, Cph)
+            return out
+
         else:
-            self._top_probs_mask()
-
-        probs = self.probs[:, None, :, None, None, None, None]  # (T,1,G,1,1,1)
-
-        yg = y.view(T, B, self.group, perG, H, W)
-
-        # region === Concrete (Gumbel-Sigmoid) 采样 ===
-        # 连续化近似伯努利采样，也叫 Concrete dropout 或 Gumbel-Sigmoid reparameterization trick。
-        if self.concrete:
-            # Concrete/Gumbel-Sigmoid 连续掩码
-            u = torch.rand_like(yg)
-            noiseG = torch.log(u) - torch.log1p(-u)
-            mask = torch.sigmoid((probs + noiseG) / self.tauMask)  # (0,1)
-        # endregion
-
-        # region === 直通概率 ===
-        else:
-            # 现将 Logits 类型的实数概率，映射回 0-1 之间的常规概率。
-            # 概率 (T,G) → 广播到 (T,1,G,1,1,1)
-            probs = self.sig(self.probs)  # (T,G)
-            probs = torch.clamp(probs, self.eps, 1 - self.eps)  # 防止超出 [0, 1] 的范围
-            # 硬伯努利 + 直通估计
-            with torch.no_grad():
-                hard = torch.bernoulli(probs.expand_as(yg))
-            mask = (hard - probs).detach() + probs  # STE
-        # endregion
-
-        out_g = yg * mask
-        out = out_g.reshape(T, B, C, H, W)
-        return out
+            raise ValueError(f"forward 仅支持 (B, HW, C) 或 (B, H, N, Cph)，但收到 {tuple(y.shape)}")
 
 
 class TCL(nn.Module):

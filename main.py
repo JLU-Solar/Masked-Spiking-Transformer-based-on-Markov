@@ -4,7 +4,6 @@
 
 import argparse
 import datetime
-import json
 import os
 import random
 import time
@@ -28,7 +27,7 @@ from utils import load_checkpoint, load_pretrained, NativeScalerWithGradNormCoun
     reduce_tensor
 from utils_QCFS import *
 
-levelLogger = "DEBUG"  # or "INFO
+levelLogger = "INFO"  # DEBUG or INFO
 
 
 def parse_option():
@@ -45,20 +44,22 @@ def parse_option():
                         help="Latency of the SNN.")
     parser.add_argument("--typeZJ", type=str, default="Darts", choices=["Darts", "Markov"],
                         help="Type of the newly introduced Masked Spiking Neurons.")
-    parser.add_argument("--group", type=int, default=8,
+    parser.add_argument("--group", type=int, default=1,
                         help="Group number of the masking operation in the Masked Spiking Neurons.")
     parser.add_argument("--tauMask", type=float, default=0.5,
                         help="The temperature coefficient of the Gumbel relaxation in the Masked Spiking Neurons.")
     parser.add_argument("--tauTopk", type=float, default=0.5,
                         help="The temperature coefficient in the Topk operation in the Masked Spiking Neurons.")
-    parser.add_argument("--notSoftTopk", default=True, action="store_false",
+    parser.add_argument("--SoftTopk", default=True, action="store_false",
                         help="If learn the sorting of the probabilities in the Masked Spiking Neurons.")
     parser.add_argument("--concrete", default=False, action="store_true",
                         help="If use the Gumbel relaxation in the Masked Spiking Neurons.")
     parser.add_argument("--eps", type=float, default=1e-6,
                         help="The constant for avoiding denominator being zero in the Masked Spiking Neurons.")
-    parser.add_argument("--init_probs_ratio", type=float, default=0.5,
+    parser.add_argument("--init_prob", type=float, default=0.5,
                         help="The initial probability for masking the features in the Masked Spiking Neurons.")
+    parser.add_argument("--init_probs_ratio", type=float, default=0.5,
+                        help="The initial probabilities' topk ratio for masking the features in the Masked Spiking Neurons.")
     parser.add_argument("--if_learn_top_probs", default=False, action="store_true",
                         help="If learn the sorting of the probabilities in the Masked Spiking Neurons.")
     # endregion
@@ -153,7 +154,7 @@ def main(config, args):
 
     # 只在主进程打印模型 & 统计参数
     if rank == 0:
-        logger.info(f"模型：\n{pformat(str(snn))}")
+        logger.info(f"模型：\n{pformat(snn)}")
         n_parameters = sum(p.numel()
                            for p in snn.parameters() if p.requires_grad)
         logger.info(f"number of params: {n_parameters}")
@@ -172,7 +173,7 @@ def main(config, args):
     else:
         model = snn  # 单卡：不包 DDP（必要时可换 DataParallel）
 
-    optimizer = build_optimizer(config, model_without_ddp)
+    optimizer = build_optimizer(config, model_without_ddp, nameLogger=logger.name)
     loss_scaler = NativeScalerWithGradNormCount()
 
     # --- lr_scheduler 构造 ---
@@ -384,7 +385,7 @@ def validate(config, data_loader, model):
         target = target.cuda(non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+        with torch.amp.autocast("cuda", enabled=config.AMP_ENABLE):
             output = model(images)
 
         # measure accuracy and record loss
@@ -510,8 +511,8 @@ if __name__ == '__main__':
         logger.info(f"Full config saved to {path}")
 
     # print config
-    logger.info(f"args 中的参数：{pformat(config.dump())}")
-    logger.info(f"json 中的参数：{pformat(json.dumps(vars(args)))}")
+    logger.info(f"config 中的参数：\n{config.dump()}")
+    logger.info(f"args 中的参数：\n{vars(args)}")
 
     # 需要同步时，加条件判断
     if use_dist:
