@@ -9,7 +9,7 @@ import os
 
 import torch
 import torch.distributed as dist
-from torch._six import inf
+inf = float('inf')
 
 
 def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger):
@@ -113,12 +113,19 @@ def auto_resume_helper(output_dir):
     return resume_file
 
 
-def reduce_tensor(tensor):
-    rt = tensor.clone()
-    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
-    rt /= dist.get_world_size()
-    return rt
 
+def reduce_tensor(tensor, average=True):
+    """
+    在分布式初始化时做all_reduce；否则直接返回原tensor。
+    """
+    if dist.is_available() and dist.is_initialized():
+        rt = tensor.detach().clone()
+        dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+        if average:
+            rt /= dist.get_world_size()
+        return rt
+    else:
+        return tensor
 
 def ampscaler_get_grad_norm(parameters, norm_type: float = 2.0) -> torch.Tensor:
     if isinstance(parameters, torch.Tensor):
@@ -140,7 +147,7 @@ class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
 
     def __init__(self):
-        self._scaler = torch.cuda.amp.GradScaler()
+        self._scaler = torch.amp.GradScaler('cuda')
 
     def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
         self._scaler.scale(loss).backward(create_graph=create_graph)

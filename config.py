@@ -3,6 +3,7 @@
 # --------------------------------------------------------'
 
 import os
+
 import yaml
 from yacs.config import CfgNode as CN
 
@@ -173,7 +174,6 @@ _C.LOCAL_RANK = 0
 # for acceleration
 _C.FUSED_WINDOW_PROCESS = False
 _C.FUSED_LAYERNORM = False
-
 
 
 def _update_config_from_file(config, cfg_file):

@@ -1,5 +1,6 @@
 import logging
 from pprint import pformat
+from typing import Optional
 
 import torch
 from spikingjelly.clock_driven import neuron
@@ -208,17 +209,46 @@ class MyMarkov(nn.Module):
 class MyDarts(nn.Module):
     def __init__(self,
                  nameLogger: str,
-                 up: float = 2.,
-                 T: int = 32,  # 父类量化步数
+                 up: Optional[float] = 2.,
+                 T: Optional[int] = 32,  # 父类量化步数
                  group: int = 8,  # G
-                 tau: float = 0.5,  # Concrete 温度
+                 tauMask: float = 0.5,  # Concrete 温度
+                 tauTopk: float = 0.5,
+                 softTopk: bool = True,
                  concrete: bool = False,
                  eps: float = 1e-6,
                  init_probs_ratio: float = 0.5,
                  if_learn_top_probs: bool = False,
                  dtype: torch.dtype = torch.float,
                  device: torch.device = torch.device(f"cuda")
-                 ):
+                 ) -> None:
+        r"""
+
+        :param nameLogger:
+        :type nameLogger: str
+        :param up:
+        :type up: float
+        :param T:
+        :type T: int
+        :param group:
+        :type group: int
+        :param tauMask:
+        :type tauMask: float
+        :param tauTopk:
+        :type tauTopk: float
+        :param concrete:
+        :type concrete: bool
+        :param eps:
+        :type eps: float
+        :param init_probs_ratio:
+        :type init_probs_ratio: float
+        :param if_learn_top_probs:
+        :type if_learn_top_probs: bool
+        :param dtype:
+        :type dtype: torch.dtype
+        :param device:
+        :type device: torch.device
+        """
         super().__init__()
 
         if up is not None and T is not None:
@@ -233,8 +263,11 @@ class MyDarts(nn.Module):
         self.T = T
         self.concrete = concrete  # 控制概率采样方式。
         self.eps = eps  # 防止分母为 0 的。
-        self.tau = tau  # 温度系数。
+        self.tauMask = tauMask  # 温度系数。
+        self.tauTopk = tauTopk
+        self.softTopk = softTopk
         self.top_probs_ratio: nn.Parameter | torch.Tensor = None
+        self._init_top_probs_ratio(init_probs_ratio)
         self.init_probs_ratio = torch.tensor(init_probs_ratio,
                                              dtype=dtype,
                                              device=device)
@@ -259,16 +292,29 @@ class MyDarts(nn.Module):
         p = torch.clamp(p, eps, 1 - eps)
         return torch.log(p) - torch.log1p(-p)
 
-    def _init_top_probs_ratio(self):
-        if self.if_learn_top_probs:
-            self.top_probs_ratio = nn.Parameter(self.init_probs_ratio,
-                                                requires_grad=True)
-            self.logger.debug(f"概率的 topk 百分比可学习")
-        else:
-            self.top_probs_ratio = self.init_probs_ratio
-            self.logger.debug(f"概率的 topk 百分比不可学习")
+    def _init_top_probs_ratio(self,
+                              init_probs_ratio: float) -> None:
+        r"""
 
-    def _init_probs(self, device, dtype) -> None:
+        :param init_probs_ratio:
+        :type init_probs_ratio: float
+        :return:
+        """
+        if self.if_learn_top_probs:
+            self.register_parameter("top_probs_ratio",
+                                    nn.Parameter(torch.tensor(init_probs_ratio),
+                                                 requires_grad=True))
+
+            self.logger.debug(f"概率的 topk 百分比【可学习】")
+        else:
+            self.register_buffer("top_probs_ratio",
+                                 torch.tensor(init_probs_ratio))
+
+            self.logger.debug(f"概率的 topk 百分比【不可学习】")
+
+    def _init_probs(self,
+                    device: torch.device,
+                    dtype: torch.dtype) -> None:
         r"""
         :param device:
         :type device: torch.device
@@ -283,7 +329,7 @@ class MyDarts(nn.Module):
         self.probs = nn.Parameter(param, requires_grad=True)
         self.logger.debug(f"初始概率：{pformat(self.probs)}")
 
-    def top_probs_mask(self, ):
+    def _top_probs_mask(self) -> None:
         top_probs_ratio = torch.clamp(self.top_probs_ratio, 0, 1)
 
         # 展平概率张量 (T*G, )
@@ -296,6 +342,7 @@ class MyDarts(nn.Module):
         # 找到第 k 大的值作为阈值
         # 当所有的元素相等时，topk 会返回前 k 个最大值的位置，而这些值是相同的。
         # 所以 topk 返回的是这些相同值的任意 k 个位置。
+        # TODO 此操作不连续不可导
         threshold = torch.topk(flat, k).values.min()
 
         # 生成 mask
@@ -305,7 +352,44 @@ class MyDarts(nn.Module):
         self.probs = self.probs * mask
         self.logger.debug(f"掩码更新后的概率为：{pformat(self.probs)}")
 
+    def _top_probs_mask_soft(self, temperature: float = 0.1) -> None:
+        """
+        可导的软 TopK 近似。
+        用 softmax(probs / T) 得到连续权重，再把加和缩放到 k（由 ratio 推出）。
+        完全可导；不会做任何硬阈值或离散索引。
+        :param temperature:
+        :type temperature: float
+        """
+        # 1) 计算 k
+        flat = self.probs.flatten()
+        N = flat.numel()
+        k = max(1, int(torch.clamp(self.top_probs_ratio, 0, 1).item() * N))
+
+        # 2) soft 权重（连续、可导）
+        #    注意：temperature 越小越接近“硬”选择，但更尖锐，梯度也更不稳定；
+        #    建议 0.05~0.5 之间调参。
+        weights = torch.softmax(flat / temperature, dim=0)  # 可导 ✔
+        weights = weights.view_as(self.probs)
+
+        # 3) 把权重总和缩放到 k（保持连续、可导）
+        sum_w = weights.sum().clamp_min(1e-12)
+        mask_soft = weights * (k / sum_w)  # 完全可导 ✔
+
+        # 4) 应用“软掩码”（得到稀疏近似效果，但梯度处处存在）
+        self.probs = self.probs * mask_soft  # 线性，可导 ✔
+
+        # 可选：日志
+        self.logger.debug(f"[soft-topk] temperature={temperature}, k={k}, sum(mask)≈{mask_soft.sum().item():.3f}")
+        self.logger.debug(f"掩码更新后的概率为：{pformat(self.probs)}")
+
     def forward(self, x: Tensor) -> Tensor:
+        r"""
+
+        :param x:
+        :type x: Tensor
+        :return:
+        :rtype: Tensor
+        """
         # 先经过已有的量化步骤。形状是（T,B,C,H,W).
         y = self.inner(x)
         T, B, C, H, W = y.shape
@@ -314,7 +398,11 @@ class MyDarts(nn.Module):
         assert C % self.G == 0, f"C={C} 不能被 G={self.group} 整除"
         perG: int = C // self.group
 
-        self.top_probs_mask()
+        if self.softTopk:
+            self._top_probs_mask_soft(temperature=self.tauTopk)
+        else:
+            self._top_probs_mask()
+
         probs = self.probs[:, None, :, None, None, None, None]  # (T,1,G,1,1,1)
 
         yg = y.view(T, B, self.group, perG, H, W)
@@ -325,7 +413,7 @@ class MyDarts(nn.Module):
             # Concrete/Gumbel-Sigmoid 连续掩码
             u = torch.rand_like(yg)
             noiseG = torch.log(u) - torch.log1p(-u)
-            mask = torch.sigmoid((probs + noiseG) / self.tau)  # (0,1)
+            mask = torch.sigmoid((probs + noiseG) / self.tauMask)  # (0,1)
         # endregion
 
         # region === 直通概率 ===

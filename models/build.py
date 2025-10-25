@@ -1,11 +1,13 @@
 # --------------------------------------------------------
 # Masked Spiking Transformer
 # --------------------------------------------------------
+import logging
 
 from .mst import MaskedSpikingTransformer
 
 
-def build_model(config, args):
+def build_model(config, args,nameLogger:str):
+    logger=logging.getLogger(nameLogger)
     model_type = config.MODEL.TYPE
 
     # accelerate layernorm
@@ -15,7 +17,7 @@ def build_model(config, args):
             layernorm = amp.normalization.FusedLayerNorm
         except:
             layernorm = None
-            print("To use FusedLayerNorm, please install apex.")
+            logger.info("To use FusedLayerNorm, please install apex.")
     else:
         import torch.nn as nn
         layernorm = nn.LayerNorm

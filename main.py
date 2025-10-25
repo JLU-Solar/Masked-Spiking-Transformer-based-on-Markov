@@ -8,6 +8,7 @@ import json
 import os
 import random
 import time
+from pprint import pformat
 
 import numpy as np
 import spikingjelly.clock_driven.functional as functional
@@ -19,13 +20,15 @@ from tqdm import tqdm
 
 from config import get_config
 from data import build_loader
-from logger import create_logger
+from logger import create_loggerGt
 from lr_scheduler import build_scheduler
 from models import build_model
 from optimizer import build_optimizer
 from utils import load_checkpoint, load_pretrained, NativeScalerWithGradNormCount, auto_resume_helper, \
     reduce_tensor
 from utils_QCFS import *
+
+levelLogger = "DEBUG"  # or "INFO
 
 
 def parse_option():
@@ -37,13 +40,35 @@ def parse_option():
         default=None,
         nargs='+',
     )
+    # region ==== 新增的参数 ====
+    parser.add_argument("--Latency", type=int, default=16,
+                        help="Latency of the SNN.")
+    parser.add_argument("--typeZJ", type=str, default="Darts", choices=["Darts", "Markov"],
+                        help="Type of the newly introduced Masked Spiking Neurons.")
+    parser.add_argument("--group", type=int, default=8,
+                        help="Group number of the masking operation in the Masked Spiking Neurons.")
+    parser.add_argument("--tauMask", type=float, default=0.5,
+                        help="The temperature coefficient of the Gumbel relaxation in the Masked Spiking Neurons.")
+    parser.add_argument("--tauTopKk", type=float, default=0.5,
+                        help="The temperature coefficient in the Topk operation in the Masked Spiking Neurons.")
+    parser.add_argument("--notSoftTopk", type=bool, default=True, action="store_false",
+                        help="If learn the sorting of the probabilities in the Masked Spiking Neurons.")
+    parser.add_argument("--concrete", type=bool, default=False, action="store_true",
+                        help="If use the Gumbel relaxation in the Masked Spiking Neurons.")
+    parser.add_argument("--eps", type=float, default=1e-6,
+                        help="The constant for avoiding denominator being zero in the Masked Spiking Neurons.")
+    parser.add_argument("--init_probs_ratio", type=float, default=0.5,
+                        help="The initial probability for masking the features in the Masked Spiking Neurons.")
+    parser.add_argument("--if_learn_top_probs", type=bool, default=False, action="store_true",
+                        help="If learn the sorting of the probabilities in the Masked Spiking Neurons.")
+    # endregion
 
     # easy config modification
     parser.add_argument('-lr', '--learning_rate', type=float, help="base-line learning rate in training")
     parser.add_argument('--seed', type=int, default=0, help="seed")
     parser.add_argument('--batch-size', type=int, help="batch size for single GPU")
     parser.add_argument('--data-path', type=str, help='path to dataset')
-    parser.add_argument('--dataset', type=str, default='imagenet', help='name of dataset')
+    parser.add_argument('--dataset', type=str, default='Cifar10', help='name of dataset')
     parser.add_argument('--zip', action='store_true', help='use zipped dataset instead of folder dataset')
     parser.add_argument('--cache-mode', type=str, default='part', choices=['no', 'full', 'part'],
                         help='no: no cache, '
@@ -102,43 +127,68 @@ def print_threshold(model):
 
 
 def main(config, args):
-    dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn = build_loader(config)
+    # --- 分布式安全判定 ---
+    use_dist = dist.is_available() and dist.is_initialized()
+    rank = dist.get_rank() if use_dist else 0
+    world_size = dist.get_world_size() if use_dist else 1
+    local_rank = getattr(config,
+                         "LOCAL_RANK",
+                         int(os.environ.get("LOCAL_RANK", 0)))
+
+    # --- 构建数据 ---
+    dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn = build_loader(config,
+                                                                                            nameLogger=logger.name)
 
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
-    ann = build_model(config, args)
-
+    ann = build_model(config, args, nameLogger=logger.name)
     threshold = args.threshold
+    snn = replace_activation_by_floor(ann,
+                                      t=config.Latency,  # 默认值16
+                                      threshold=threshold,
+                                      nameLogger=logger.name)
 
-    snn = replace_activation_by_floor(ann, t=16, threshold=threshold)
-
-    if dist.get_rank() == 0:
-        logger.info(str(snn))
-
-        n_parameters = sum(p.numel() for p in snn.parameters() if p.requires_grad)
+    # 只在主进程打印模型 & 统计参数
+    if rank == 0:
+        logger.info(f"模型：\n{pformat(str(snn))}")
+        n_parameters = sum(p.numel()
+                           for p in snn.parameters() if p.requires_grad)
         logger.info(f"number of params: {n_parameters}")
 
-    snn.cuda()
+    # --- 设备 & DDP 包装（仅分布式时）---
+    device = torch.device(
+        f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    snn = snn.to(device, non_blocking=True)
+
     model_without_ddp = snn
-    optimizer = build_optimizer(config, snn)
-    deivce = int(os.environ['LOCAL_RANK'])
-    model = torch.nn.parallel.DistributedDataParallel(snn, device_ids=[deivce], broadcast_buffers=False)
+    if use_dist:
+        # 注意 device_ids 只放本地 rank
+        model = torch.nn.parallel.DistributedDataParallel(
+            snn, device_ids=[local_rank], broadcast_buffers=False
+        )
+    else:
+        model = snn  # 单卡：不包 DDP（必要时可换 DataParallel）
+
+    optimizer = build_optimizer(config, model_without_ddp)
     loss_scaler = NativeScalerWithGradNormCount()
 
+    # --- lr_scheduler 构造 ---
+    iters_per_epoch = len(data_loader_train)
     if config.TRAIN.ACCUMULATION_STEPS > 1:
-        lr_scheduler = build_scheduler(config, optimizer, len(data_loader_train) // config.TRAIN.ACCUMULATION_STEPS)
-    else:
-        lr_scheduler = build_scheduler(config, optimizer, len(data_loader_train))
+        iters_per_epoch //= config.TRAIN.ACCUMULATION_STEPS
+    lr_scheduler = build_scheduler(config, optimizer, iters_per_epoch)
 
+    # --- 选择 loss ---
     if config.AUG.MIXUP > 0.:
-        # smoothing is handled with mixup label transform
         criterion = SoftTargetCrossEntropy()
     elif config.MODEL.LABEL_SMOOTHING > 0.:
-        criterion = LabelSmoothingCrossEntropy(smoothing=config.MODEL.LABEL_SMOOTHING)
+        criterion = LabelSmoothingCrossEntropy(
+            smoothing=config.MODEL.LABEL_SMOOTHING)
     else:
         criterion = torch.nn.CrossEntropyLoss()
 
     max_accuracy = 0.0
 
+    # --- 恢复预训练权重 ---
     if config.TRAIN.AUTO_RESUME:
         resume_file = auto_resume_helper(config.OUTPUT)
         if resume_file:
@@ -149,51 +199,70 @@ def main(config, args):
             config.freeze()
             logger.info(f'auto resuming from {resume_file}')
         else:
-            logger.info(f'no checkpoint found in {config.OUTPUT}, ignoring auto resume')
+            logger.info(
+                f'no checkpoint found in {config.OUTPUT}, ignoring auto resume')
 
     if config.MODEL.RESUME:
-        max_accuracy = load_checkpoint(config, model_without_ddp, optimizer, lr_scheduler, loss_scaler, logger)
+        max_accuracy = load_checkpoint(
+            config, model_without_ddp, optimizer, lr_scheduler, loss_scaler, logger)
         if config.EVAL_MODE:
             return
 
     if config.MODEL.PRETRAINED and (not config.MODEL.RESUME):
         load_pretrained(config, model_without_ddp, logger)
 
+    # --- 吞吐量或只验证 ---
     if config.THROUGHPUT_MODE:
         throughput(data_loader_val, model, logger)
         return
 
     if args.snnvalidate:
-        acc = snn_validate(config, data_loader_val, model, sim_len=args.sim_len)
-        if dist.get_rank() == 0:
-            print(acc.cpu())
+        acc = snn_validate(config, data_loader_val,
+                           model, sim_len=args.sim_len)
+        if rank == 0:
+            logger.info(f"val acc: {pformat(acc.cpu())}")
         return
 
+    # --- 训练 ---
     logger.info("Start training")
     start_time = time.time()
     for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
-        data_loader_train.sampler.set_epoch(epoch)
-        train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,
-                        loss_scaler)
+        # 只有分布式的 DistributedSampler 才有 set_epoch；单卡 Random/Sequential 没这个方法
+        if hasattr(data_loader_train.sampler, "set_epoch"):
+            data_loader_train.sampler.set_epoch(epoch)
+
+        train_one_epoch(
+            config, model, criterion, data_loader_train, optimizer, epoch,
+            mixup_fn, lr_scheduler, loss_scaler
+        )
 
         acc1, acc5, loss = validate(config, data_loader_val, model)
-        if dist.get_rank() == 0:
-            if wandb:
+
+        if rank == 0:
+            # wandb 导入做安全判断
+            if "wandb" in globals() and wandb:
                 wandb.log({"test_loss": loss}, step=epoch)
                 wandb.log({"test_acc": acc1}, step=epoch)
-                wandb.log({'lr': float(optimizer.state_dict()['param_groups'][0]['lr'])}, step=epoch)
+                wandb.log({'lr': float(optimizer.state_dict()[
+                                           'param_groups'][0]['lr'])}, step=epoch)
+
             if max_accuracy < acc1:
                 max_accuracy = acc1
-                save_state = {'model': model_without_ddp.state_dict(),
-                              'optimizer': optimizer.state_dict(),
-                              'lr_scheduler': lr_scheduler.state_dict(),
-                              'max_accuracy': max_accuracy,
-                              'scaler': loss_scaler.state_dict(),
-                              'epoch': epoch,
-                              'config': config}
-                torch.save(save_state, os.path.join(config.OUTPUT, 'best_model.pth'))
-                print('saving...')
-        logger.info(f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
+                save_state = {
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'max_accuracy': max_accuracy,
+                    'scaler': loss_scaler.state_dict(),
+                    'epoch': epoch,
+                    'config': config
+                }
+                torch.save(save_state, os.path.join(
+                    config.OUTPUT, 'best_model.pth'))
+                logger.info('saving...')
+
+        logger.info(
+            f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
         max_accuracy = max(max_accuracy, acc1)
         logger.info(f'Max accuracy: {max_accuracy:.2f}%')
 
@@ -231,7 +300,7 @@ def snn_validate(config, data_loader, model, sim_len):
                 f'Test: [{idx}/{len(data_loader)}]\t'
                 f'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                 f'Mem {memory_used:.0f}MB')
-        print(tot / length)
+        logger.info(f"processed: {tot / length}")
     return tot / length
 
 
@@ -254,7 +323,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+        with torch.amp.autocast("cuda", enabled=config.AMP_ENABLE):
             outputs = model(samples)
         loss = criterion(outputs, targets)
         loss = loss / config.TRAIN.ACCUMULATION_STEPS
@@ -363,48 +432,90 @@ def throughput(data_loader, model, logger):
         return
 
 
+def is_dist_run():
+    """判断是否由 torchrun/torch.distributed 启动"""
+    # WORLD_SIZE>1，或者明确提供了RANK/LOCAL_RANK都算分布式
+    ws = int(os.environ.get("WORLD_SIZE", "1"))
+    has_rank_vars = ("RANK" in os.environ and "LOCAL_RANK" in os.environ)
+    return ws > 1 or has_rank_vars
+
+
 if __name__ == '__main__':
     args, config = parse_option()
 
-    if config.AMP_OPT_LEVEL:
+    if getattr(config, "AMP_OPT_LEVEL", None):
         print("[warning] Apex amp has been deprecated, please use pytorch amp instead!")
 
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ['LOCAL_RANK'])
-        print(f"RANK and WORLD_SIZE in environ: {rank}/{world_size}")
-    else:
-        rank = -1
-        world_size = -1
-    torch.cuda.set_device(local_rank)
-    torch.distributed.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
-    torch.distributed.barrier()
+    use_dist = is_dist_run()
 
-    seed = args.seed + dist.get_rank()
+    if use_dist:
+        # 从环境变量读取
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+
+        # 只在分布式时初始化
+        dist.init_process_group(backend='nccl', init_method='env://',
+                                world_size=world_size, rank=rank)
+        # 可选：确保进程对齐
+        dist.barrier()
+        print(f"[dist] RANK {rank}/{world_size} on local_rank={local_rank}")
+    else:
+        # 单机单卡/CPU（无分布式环境变量）
+        rank = 0
+        world_size = 1
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))  # 允许用户手动传
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+
+    # ---- 随机种子：分布式用全局rank偏移，单机直接用seed ----
+    base_seed = getattr(args, "seed", 42)
+    seed = base_seed + (dist.get_rank() if use_dist else rank)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
     cudnn.benchmark = True
 
+    # ---- 日志/输出目录 ----
     os.makedirs(config.OUTPUT, exist_ok=True)
-    logger = create_logger(output_dir=config.OUTPUT, dist_rank=dist.get_rank(), name=f"{config.MODEL.NAME}")
-
-    if dist.get_rank() == 0:
+    # 注意：不要在未初始化dist时调用 dist.get_rank()
+    timeLocal = time.strftime("%Y-%m-%d_%X", time.localtime())
+    logger = create_loggerGt(dirLog=config.OUTPUT,
+                             t=timeLocal,
+                             dist_rank=rank,
+                             name=f"{config.MODEL.NAME}")
+    logger.setLevel(levelLogger)
+    if rank == 0:
         try:
             import wandb
+
+            has_wandb = True
         except ImportError:
+            has_wandb = False
             args.wandb = False
-        if args.wandb:
+
+        if getattr(args, "wandb", False) and has_wandb:
             wandb.init(project="mst", entity="mst", config=config, name='mst')
+
         path = os.path.join(config.OUTPUT, "config.json")
         with open(path, "w") as f:
             f.write(config.dump())
         logger.info(f"Full config saved to {path}")
 
     # print config
-    logger.info(config.dump())
-    logger.info(json.dumps(vars(args)))
+    logger.info(f"args 中的参数：{pformat(config.dump())}")
+    logger.info(f"json 中的参数：{pformat(json.dumps(vars(args)))}")
 
+    # 需要同步时，加条件判断
+    if use_dist:
+        dist.barrier()
+
+    # 进入训练
     main(config, args)
+
+    # 结束前可选清理
+    if use_dist and dist.is_initialized():
+        dist.destroy_process_group()

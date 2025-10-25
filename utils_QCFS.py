@@ -1,7 +1,11 @@
+import logging
+from argparse import Namespace
+
 import torch
 import torch.nn as nn
 
-from modules_QCFS import TCL, MyFloor, ScaledNeuron, StraightThrough
+from models.mst import MaskedSpikingTransformer
+from modules_QCFS import TCL, MyFloor, ScaledNeuron, StraightThrough, MyDarts, MyMarkov
 
 
 def isActivation(name):
@@ -29,22 +33,66 @@ def replace_activation_by_module(model, m):
     return model
 
 
-def replace_activation_by_floor(model, t, threshold):
+def replace_activation_by_floor(model: MaskedSpikingTransformer,
+                                t: int,
+                                threshold: float,
+                                args: Namespace,
+                                typeZJ: str,
+                                nameLogger: str):
+    r"""
+
+    :param model:
+    :type model: MaskedSpikingTransformer
+    :param t:
+    :type t: int
+    :param threshold:
+    :type threshold: float
+    :param args:
+    :type args: Namespace
+    :param typeZJ:
+    :type typeZJ: str
+    :param nameLogger:
+    :type nameLogger: str
+    :return:
+    """
+    modulesZJ = {
+        "Markov": MyMarkov,
+        "Darts": MyDarts,
+    }
+    logger = logging.getLogger(nameLogger)
     for name, module in model._modules.items():
         if hasattr(module, "_modules"):
             model._modules[name] = replace_activation_by_floor(module, t, threshold)
         if isActivation(module.__class__.__name__.lower()):
-            if hasattr(module, "up"):
-                print(module.up.item())
-                if t == 0:
-                    model._modules[name] = TCL()
-                else:
-                    model._modules[name] = MyFloor(module.up.item(), t)
+            valueUp = threshold
+
+            if hasattr(module, "up"):  # 判断是否有 up 属性
+                logger.info(f"模块{name} 有up成员： {module.up.item()}")
+                valueUp = module.up.item()
+
+            # 根据 t 的值来决定 up, T 的值，后二者决定了具体使用的是 TCL 还是 Floor
+            if t == 0:
+                up = None,
+                T = None
+                # model._modules[name] = TCL()
+
             else:
-                if t == 0:
-                    model._modules[name] = TCL()
-                else:
-                    model._modules[name] = MyFloor(threshold, t)
+                up = valueUp
+                T = t
+
+            model._modules[name] = modulesZJ[args.typeZJ](up=up,
+                                                          T=T,
+                                                          nameLogger=nameLogger,
+                                                          group=args.group,
+                                                          tauMask=args.tauMask,
+                                                          tauTopk=args.tauTopk,
+                                                          softTopk=args.softTopk,
+                                                          concrete=args.concrete,
+                                                          eps=args.eps,
+                                                          init_probs_ratio=args.init_probs_ratio,
+                                                          if_learn_top_probs=args.if_learn_top_probs)
+            # model._modules[name] = MyFloor(valueUp, t)
+
     return model
 
 

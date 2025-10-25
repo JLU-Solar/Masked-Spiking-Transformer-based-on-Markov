@@ -1,7 +1,7 @@
 # --------------------------------------------------------
 # Masked Spiking Transformer
 # --------------------------------------------------------
-
+import logging
 import os
 
 import torch
@@ -39,31 +39,55 @@ except:
 import numpy as np
 
 
-def build_loader(config):
+def build_loader(config,
+                 nameLogger: str):
+    logger = logging.getLogger(nameLogger)
+    # ---- 分布式安全判定 ----
+    is_dist = dist.is_available() and dist.is_initialized()
+    world_size = dist.get_world_size() if is_dist else 1
+    global_rank = dist.get_rank() if is_dist else 0
+    local_rank = getattr(config, "LOCAL_RANK", 0)
+
+    # ---- 数据集 ----
     config.defrost()
-    dataset_train, config.MODEL.NUM_CLASSES = build_dataset(is_train=True, config=config)
+    dataset_train, config.MODEL.NUM_CLASSES = build_dataset(
+        is_train=True, config=config)
     config.freeze()
-    print(f"local rank {config.LOCAL_RANK} / global rank {dist.get_rank()} successfully build train dataset")
+
+    logger.info(f"local rank {local_rank} / global rank {global_rank} successfully build train dataset")
+
     dataset_val, _ = build_dataset(is_train=False, config=config)
-    print(f"local rank {config.LOCAL_RANK} / global rank {dist.get_rank()} successfully build val dataset")
+    logger.info(f"local rank {local_rank} / global rank {global_rank} successfully build val dataset")
 
-    num_tasks = dist.get_world_size()
-    global_rank = dist.get_rank()
-    if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == 'part':
-        indices = np.arange(dist.get_rank(), len(dataset_train), dist.get_world_size())
-        sampler_train = SubsetRandomSampler(indices)
+    # ---- Sampler（分布式与单机分支）----
+    if is_dist:
+        # 分布式训练
+        if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == 'part':
+            indices = np.arange(global_rank, len(dataset_train), world_size)
+            sampler_train = SubsetRandomSampler(indices)
+        else:
+            sampler_train = torch.utils.data.DistributedSampler(
+                dataset_train, num_replicas=world_size, rank=global_rank, shuffle=True
+            )
+
+        if config.TEST.SEQUENTIAL:
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        else:
+            sampler_val = torch.utils.data.DistributedSampler(
+                dataset_val, shuffle=config.TEST.SHUFFLE
+            )
     else:
-        sampler_train = torch.utils.data.DistributedSampler(
-            dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-        )
+        # 单机单进程
+        if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == 'part':
+            # 单机下无需分片，直接全量随机采样
+            sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        else:
+            sampler_train = torch.utils.data.RandomSampler(dataset_train)
 
-    if config.TEST.SEQUENTIAL:
+        # 验证集通常顺序采样更稳定
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    else:
-        sampler_val = torch.utils.data.distributed.DistributedSampler(
-            dataset_val, shuffle=config.TEST.SHUFFLE
-        )
 
+    # ---- DataLoader ----
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=config.DATA.BATCH_SIZE,
@@ -75,20 +99,30 @@ def build_loader(config):
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
         batch_size=config.DATA.BATCH_SIZE,
-        shuffle=False,
+        shuffle=False,  # 提供了sampler就不要shuffle
         num_workers=config.DATA.NUM_WORKERS,
         pin_memory=config.DATA.PIN_MEMORY,
         drop_last=False
     )
 
-    # setup mixup / cutmix
+    # ---- mixup / cutmix ----
     mixup_fn = None
-    mixup_active = config.AUG.MIXUP > 0 or config.AUG.CUTMIX > 0. or config.AUG.CUTMIX_MINMAX is not None
+    mixup_active = (
+            config.AUG.MIXUP > 0 or
+            config.AUG.CUTMIX > 0. or
+            config.AUG.CUTMIX_MINMAX is not None
+    )
     if mixup_active:
         mixup_fn = Mixup(
-            mixup_alpha=config.AUG.MIXUP, cutmix_alpha=config.AUG.CUTMIX, cutmix_minmax=config.AUG.CUTMIX_MINMAX,
-            prob=config.AUG.MIXUP_PROB, switch_prob=config.AUG.MIXUP_SWITCH_PROB, mode=config.AUG.MIXUP_MODE,
-            label_smoothing=config.MODEL.LABEL_SMOOTHING, num_classes=config.MODEL.NUM_CLASSES)
+            mixup_alpha=config.AUG.MIXUP,
+            cutmix_alpha=config.AUG.CUTMIX,
+            cutmix_minmax=config.AUG.CUTMIX_MINMAX,
+            prob=config.AUG.MIXUP_PROB,
+            switch_prob=config.AUG.MIXUP_SWITCH_PROB,
+            mode=config.AUG.MIXUP_MODE,
+            label_smoothing=config.MODEL.LABEL_SMOOTHING,
+            num_classes=config.MODEL.NUM_CLASSES
+        )
 
     return dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn
 
@@ -117,12 +151,14 @@ def build_dataset(is_train, config):
             transforms.Resize(224),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                 (0.2023, 0.1994, 0.2010)),
         ])
         transform_test = transforms.Compose([
             transforms.Resize(224),
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                 (0.2023, 0.1994, 0.2010)),
         ])
         if is_train:
             dataset = datasets.CIFAR100(datapath[config.DATA.DATASET], train=True,
@@ -137,13 +173,15 @@ def build_dataset(is_train, config):
             transforms.Resize(224),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                 (0.2023, 0.1994, 0.2010)),
         ])
 
         transform_test = transforms.Compose([
             transforms.Resize(224),
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                 (0.2023, 0.1994, 0.2010)),
         ])
         if is_train:
             dataset = datasets.CIFAR10(datapath[config.DATA.DATASET], train=True,
