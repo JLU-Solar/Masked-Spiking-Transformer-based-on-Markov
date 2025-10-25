@@ -66,7 +66,8 @@ def regular_set(model, paras=([], [], [], [])):
 
 def build_optimizer(config,
                     model: MaskedSpikingTransformer,
-                    nameLogger: str) -> None:
+                    nameLogger: str,
+                    modeParams:str) -> None:
     r"""
     Build optimizer, set weight decay of normalization to 0 by default.
     :param config:
@@ -75,8 +76,12 @@ def build_optimizer(config,
     :type model:
     :param nameLogger:
     :type nameLogger:
+    :param modeParams:
+    :type modeParams:
     """
     logger = logging.getLogger(nameLogger)
+    if modeParams == "none":
+        logger.warning(f"注意，参数modeParams = none 会将 model 中所有的参数都冻结，损失会无法反传。")
     skip = {}
     skip_keywords = {}
     if hasattr(model, 'no_weight_decay'):
@@ -84,7 +89,7 @@ def build_optimizer(config,
     if hasattr(model, 'no_weight_decay_keywords'):
         skip_keywords = model.no_weight_decay_keywords()
     dictInfoAfterSetGrads = set_requires_grad_switch(model=model,
-                                                     mode="only_ZJ")
+                                                     mode=modeParams)
     logger.info(f"梯度设置的结果：{pformat(dictInfoAfterSetGrads)}")
     parameters = set_weight_decay(model, skip, skip_keywords)
 
