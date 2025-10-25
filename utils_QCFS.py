@@ -62,7 +62,10 @@ def replace_activation_by_floor(model: MaskedSpikingTransformer,
     logger = logging.getLogger(nameLogger)
     for name, module in model._modules.items():
         if hasattr(module, "_modules"):
-            model._modules[name] = replace_activation_by_floor(module, t, threshold)
+            model._modules[name] = replace_activation_by_floor(
+                module, t, threshold,
+                args, typeZJ, nameLogger
+            )
         if isActivation(module.__class__.__name__.lower()):
             valueUp = threshold
 
