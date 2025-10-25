@@ -173,7 +173,10 @@ def main(config, args):
     else:
         model = snn  # 单卡：不包 DDP（必要时可换 DataParallel）
 
-    optimizer = build_optimizer(config, model_without_ddp, nameLogger=logger.name)
+    optimizer = build_optimizer(config,
+                                model_without_ddp,
+                                nameLogger=logger.name,
+                                modeParams="only_ZJ")
     loss_scaler = NativeScalerWithGradNormCount()
 
     # --- lr_scheduler 构造 ---

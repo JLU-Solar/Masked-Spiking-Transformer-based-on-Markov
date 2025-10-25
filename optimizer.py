@@ -9,6 +9,7 @@ from pprint import pformat
 from typing import Union, Tuple, Type, Dict
 
 from torch import optim as optim, nn
+from torch.optim import Optimizer
 
 from models.mst import MaskedSpikingTransformer
 from modules_QCFS import MyDarts, MyMarkov
@@ -67,7 +68,7 @@ def regular_set(model, paras=([], [], [], [])):
 def build_optimizer(config,
                     model: MaskedSpikingTransformer,
                     nameLogger: str,
-                    modeParams:str) -> None:
+                    modeParams:str) -> Optimizer:
     r"""
     Build optimizer, set weight decay of normalization to 0 by default.
     :param config:

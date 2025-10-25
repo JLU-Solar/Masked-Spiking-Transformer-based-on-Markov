@@ -1,0 +1,61 @@
+[project]
+name = "masked-spiking-transformer-based-on-markov"
+version = "0.1.0"
+description = "The official implementation of Masked-Spiking-Transformer-based-on-Markov"
+readme = "README.md"
+requires-python = "3.10.18"
+dependencies = []
+[[project.authors]]
+name = "Gt"
+
+[build-system]
+requires = [ "poetry-core>=2.0.0,<3.0.0",]
+build-backend = "poetry.core.masonry.api"
+
+[project.license]
+text = "MiT"
+
+[tool.poetry.dependencies]
+# 请选择与你环境匹配的 Python 版本（Torch 2.8 通常支持 3.10~3.12）
+python = "3.10.18"
+
+# ---- Core runtime ----
+numpy = "2.1.2"
+Pillow = "11.0.0"
+PyYAML = "6.0.3"
+yacs = "0.1.8"
+timm = "1.0.20"
+spikingjelly = "0.0.0.0.14"
+termcolor = "3.1.0"
+pandas = "2.3.3"
+scipy = "1.15.3"
+tqdm = "4.67.1"
+
+# ---- Logging / TB ----
+tensorboard = "2.20.0"
+tensorboard-data-server = "0.7.2"
+
+# ---- HF ecosystem (如使用到) ----
+huggingface-hub = "0.35.3"
+safetensors = "0.6.2"
+fsspec = "2024.6.1"
+requests = "2.32.5"
+
+# ---- Optional: Lightning（若你代码确实使用）----
+pytorch-lightning = "2.5.5"
+lightning-utilities = "0.15.2"
+
+# ---- Vision stack ----
+# 注意：带 +cu126 的轮子需要额外源（见下方 [[tool.poetry.source]])
+torch = { version = "2.8.0+cu126", source = "pytorch-cu126" }
+torchvision = { version = "0.23.0+cu126", source = "pytorch-cu126" }
+triton = "3.4.0"
+
+ ipython = "8.37.0"
+ matplotlib = "3.10.7"
+
+# ===== PyTorch CUDA 12.6 源（根据你 requirements 的 +cu126）=====
+[[tool.poetry.source]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+priority = "supplemental"
