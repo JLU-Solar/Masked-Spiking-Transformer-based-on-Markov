@@ -266,7 +266,7 @@ class MyDarts(nn.Module):
         self.tauMask = tauMask  # 温度系数。
         self.tauTopk = tauTopk
         self.softTopk = softTopk
-        self.top_probs_ratio: nn.Parameter | torch.Tensor = None
+        # self.top_probs_ratio: nn.Parameter | torch.Tensor = None
         self._init_top_probs_ratio(init_probs_ratio)
         self.init_probs_ratio = torch.tensor(init_probs_ratio,
                                              dtype=dtype,
