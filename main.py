@@ -51,15 +51,15 @@ def parse_option():
                         help="The temperature coefficient of the Gumbel relaxation in the Masked Spiking Neurons.")
     parser.add_argument("--tauTopKk", type=float, default=0.5,
                         help="The temperature coefficient in the Topk operation in the Masked Spiking Neurons.")
-    parser.add_argument("--notSoftTopk", type=bool, default=True, action="store_false",
+    parser.add_argument("--notSoftTopk", default=True, action="store_false",
                         help="If learn the sorting of the probabilities in the Masked Spiking Neurons.")
-    parser.add_argument("--concrete", type=bool, default=False, action="store_true",
+    parser.add_argument("--concrete", default=False, action="store_true",
                         help="If use the Gumbel relaxation in the Masked Spiking Neurons.")
     parser.add_argument("--eps", type=float, default=1e-6,
                         help="The constant for avoiding denominator being zero in the Masked Spiking Neurons.")
     parser.add_argument("--init_probs_ratio", type=float, default=0.5,
                         help="The initial probability for masking the features in the Masked Spiking Neurons.")
-    parser.add_argument("--if_learn_top_probs", type=bool, default=False, action="store_true",
+    parser.add_argument("--if_learn_top_probs", default=False, action="store_true",
                         help="If learn the sorting of the probabilities in the Masked Spiking Neurons.")
     # endregion
 
